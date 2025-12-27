@@ -41,6 +41,11 @@ def get_file_data(token, file_key):
     return client.get_file(file_key)
 
 @st.cache_data(ttl=600)
+def get_image_data(token, file_key):
+    client = figma.FigmaClient(token)
+    return client.get_image_fills(file_key)
+
+@st.cache_data(ttl=600)
 def get_rendered_images(token, file_key, ids):
     client = figma.FigmaClient(token)
     return client.get_images(file_key, ids)
@@ -80,6 +85,7 @@ if load_btn and token and file_url:
 if 'file_data' in st.session_state:
     data = st.session_state['file_data']
     document = data['document']
+    file_key = parse_file_key(file_url) # Re-parse to ensure it is available for export
     
     # Safely get image metadata, defaulting to empty dict if None
     raw_image_meta = st.session_state.get('image_meta')
@@ -221,23 +227,34 @@ if 'file_data' in st.session_state:
                                     img_url = rendered_data['images'].get(node_id)
                                     if img_url:
                                         try:
-                                            resp = requests.get(img_url, timeout=10)
+                                            resp = requests.get(img_url, timeout=15)
                                             if resp.status_code == 200:
+                                                # Sanitize name and ID for filename
                                                 safe_name = re.sub(r'[^a-zA-Z0-9_-]', '', name)
-                                                return f"screens/images/{safe_name}.png", resp.content
+                                                safe_id = node_id.replace(':', '-')
+                                                return f"screens/images/{safe_name}_{safe_id}.png", resp.content
+                                            else:
+                                                print(f"Failed to download {name}: Status {resp.status_code}")
                                         except Exception as e:
-                                            print(f"Failed to download screen image {name}: {e}")
+                                            print(f"Error downloading screen {name}: {e}")
                                     return None
 
                                 # Download in parallel
                                 name_id_pairs = [(name, next(f['id'] for f in frames if f['name'] == name)) for name in selected_frames_names]
+                                total_screens = len(name_id_pairs)
+                                progress_bar = st.progress(0)
+                                
                                 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
                                     future_to_screen = {executor.submit(download_screen_img, pair): pair for pair in name_id_pairs}
+                                    completed = 0
                                     for future in concurrent.futures.as_completed(future_to_screen):
                                         result = future.result()
                                         if result:
                                             filename, content = result
                                             zf.writestr(filename, content)
+                                        completed += 1
+                                        progress_bar.progress(completed / total_screens, text=f"Downloaded {completed}/{total_screens} screen images")
+                                progress_bar.empty()
                         
                         # 5. Export Images (PNGs)
                         # Only download images used in the selected screens
@@ -260,22 +277,33 @@ if 'file_data' in st.session_state:
                                 if ref and ('images' in image_meta) and (ref in image_meta['images']):
                                     img_url = image_meta['images'][ref]
                                     try:
-                                        resp = requests.get(img_url, timeout=5)
+                                        resp = requests.get(img_url, timeout=10)
                                         if resp.status_code == 200:
                                             img_name = re.sub(r'[^a-zA-Z0-9_-]', '', img['name'])
-                                            return f"images/{img_name}_{img['id']}.png", resp.content
+                                            safe_id = img['id'].replace(':', '-')
+                                            return f"images/{img_name}_{safe_id}.png", resp.content
+                                        else:
+                                            print(f"Failed to download asset {img['name']}: Status {resp.status_code}")
                                     except Exception as e:
-                                        print(f"Failed to download image {img['name']}: {e}")
+                                        print(f"Error downloading asset {img['name']}: {e}")
                                 return None
+                                
 
                             # Download in parallel with more workers
+                            total_assets = len(relevant_images)
+                            asset_progress = st.progress(0)
+                            
                             with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
                                 future_to_img = {executor.submit(download_image, img): img for img in relevant_images}
+                                completed_assets = 0
                                 for future in concurrent.futures.as_completed(future_to_img):
                                     result = future.result()
                                     if result:
                                         filename, content = result
                                         zf.writestr(filename, content)
+                                    completed_assets += 1
+                                    asset_progress.progress(completed_assets / total_assets, text=f"Downloaded {completed_assets}/{total_assets} image assets")
+                            asset_progress.empty()
                     
                     end_time = time.time()
                     duration = end_time - start_time
